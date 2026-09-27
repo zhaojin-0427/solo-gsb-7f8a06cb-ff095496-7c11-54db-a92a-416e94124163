@@ -17,6 +17,15 @@ const EDGE_STATUS_LABEL = {
   risk: { text: '出血不足', cls: 'risk' },
 };
 
+const ANNOT_STATUS_LABEL = {
+  'print-ok': { text: '打印候选', cls: 'ok' },
+  'print-confirm': { text: '待确认', cls: 'replaceable' },
+  'screen-risk': { text: '漏印风险', cls: 'risk' },
+  offpage: { text: '页外', cls: 'skip' },
+  inactive: { text: '不显示不打印', cls: 'skip' },
+  unknown: { text: '无法判断', cls: 'unknown' },
+};
+
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
   hideError();
@@ -99,6 +108,8 @@ function renderReport(data) {
     row('无法判断页', `${summary.unknownPages.length} 页（${pageList(summary.unknownPages)}）：盒无效或交集为空`)
   );
 
+  renderAnnotationSummary(data);
+
   const pagesWrap = document.getElementById('pages');
   pagesWrap.textContent = '';
   for (const page of data.pages) {
@@ -145,6 +156,8 @@ function renderPage(page) {
   } else if (!page.bleedDeclared && page.status !== 'unknown') {
     card.appendChild(noteP('页面未显式声明 BleedBox，不套用默认盒，四边出血距离无法计算。'));
   }
+
+  card.appendChild(renderAnnotations(page.annotations));
 
   for (const text of page.notes) {
     card.appendChild(noteP(text));
@@ -252,6 +265,115 @@ function renderBleedTable(page) {
   }
   wrap.appendChild(table);
   return wrap;
+}
+
+// ---- 注释印刷风险区 ----
+
+function renderAnnotationSummary(data) {
+  const ann = data.summary.annotation;
+  const pageList = (arr) =>
+    arr.length === 0 ? '无' : `第 ${arr.join('、')} 页`;
+  const c = ann.counts;
+
+  const dl = document.getElementById('annot-summary');
+  dl.replaceChildren(
+    row('含注释的页', `${ann.pagesWithAnnots.length} 页（${pageList(ann.pagesWithAnnots)}）；注释共 ${c.total} 条`),
+    row(
+      '漏印风险页',
+      `${ann.screenRiskPages.length} 页（${pageList(ann.screenRiskPages)}）：屏显可见但未设 Print，共 ${c.screenRisk} 条`
+    ),
+    row(
+      '待确认页',
+      `${ann.printConfirmPages.length} 页（${pageList(ann.printConfirmPages)}）：设 Print 但 /AP/N 外观缺失或损坏，共 ${c.printConfirm} 条`
+    ),
+    row('打印候选页', `${ann.printOkPages.length} 页（${pageList(ann.printOkPages)}）：设 Print 且外观有效，共 ${c.printOk} 条`),
+    row('页外注释页', `${ann.offpagePages.length} 页（${pageList(ann.offpagePages)}）：矩形与可见页框无交集，共 ${c.offpage} 条`),
+    row('无法判断注释页', `${ann.unknownPages.length} 页（${pageList(ann.unknownPages)}）：坏引用或非法字段，共 ${c.unknown} 条`)
+  );
+}
+
+function renderAnnotations(annot) {
+  const wrap = document.createElement('div');
+  wrap.className = 'annot-block';
+
+  const caption = document.createElement('p');
+  caption.className = 'table-caption annot-caption';
+  if (!annot.present) {
+    caption.textContent = '注释印刷风险：本页无注释（无 /Annots）。';
+    wrap.appendChild(caption);
+    return wrap;
+  }
+  if (!annot.listValid) {
+    caption.textContent = `注释印刷风险：${annot.note || '/Annots 无法解析。'}`;
+    wrap.appendChild(caption);
+    return wrap;
+  }
+
+  const c = annot.counts;
+  const chips = [];
+  if (c.screenRisk > 0) chips.push(`漏印风险 ${c.screenRisk}`);
+  if (c.printConfirm > 0) chips.push(`待确认 ${c.printConfirm}`);
+  if (c.unknown > 0) chips.push(`无法判断 ${c.unknown}`);
+  if (c.offpage > 0) chips.push(`页外 ${c.offpage}`);
+  if (c.printOk > 0) chips.push(`打印候选 ${c.printOk}`);
+  if (c.inactive > 0) chips.push(`不显示不打印 ${c.inactive}`);
+  caption.textContent = `注释印刷风险（共 ${c.total} 条${chips.length ? '；' + chips.join('、') : ''}）：`;
+  wrap.appendChild(caption);
+
+  if (annot.note) wrap.appendChild(noteP(annot.note));
+  if (c.total === 0) {
+    wrap.appendChild(noteP('/Annots 为空数组：本页没有注释对象。'));
+    return wrap;
+  }
+
+  const table = document.createElement('table');
+  table.className = 'annots';
+  table.innerHTML = `
+    <thead>
+      <tr><th>#</th><th>类型（/Subtype）</th><th>位置（mm，旋转后阅读方向）</th><th>屏显</th><th>打印</th><th>判定与原因</th></tr>
+    </thead>
+    <tbody></tbody>`;
+  const tbody = table.querySelector('tbody');
+  for (const a of annot.list) {
+    const tr = document.createElement('tr');
+    if (a.status === 'screen-risk') tr.className = 'row-mismatch';
+    else if (a.status === 'unknown') tr.className = 'row-unknown';
+    tr.appendChild(td(String(a.index)));
+    tr.appendChild(td(a.subtypeName + (a.ref ? ` [${a.ref}]` : '')));
+    tr.appendChild(td(positionText(a), 'num'));
+    tr.appendChild(td(a.screen ? ynText(a.screen.candidate) : '—'));
+    tr.appendChild(td(a.print ? ynText(a.print.candidate) : '—'));
+
+    const verdictTd = document.createElement('td');
+    const label = ANNOT_STATUS_LABEL[a.status] || ANNOT_STATUS_LABEL.unknown;
+    const chip = document.createElement('span');
+    chip.className = `badge ${label.cls}`;
+    chip.textContent = label.text;
+    verdictTd.appendChild(chip);
+    if (Array.isArray(a.reasons) && a.reasons.length > 0) {
+      const why = document.createElement('div');
+      why.className = 'annot-reason';
+      why.textContent = a.reasons.join(' ');
+      verdictTd.appendChild(why);
+    }
+    tr.appendChild(verdictTd);
+    tbody.appendChild(tr);
+  }
+  wrap.appendChild(table);
+  return wrap;
+}
+
+function ynText(on) {
+  const span = document.createElement('span');
+  span.textContent = on ? '是' : '否';
+  span.className = `yn-${on ? 'yes' : 'no'}`;
+  return span;
+}
+
+function positionText(a) {
+  const p = a.positionMm;
+  if (!p) return '—';
+  return `左 ${fmt(p.left)} 上 ${fmt(p.top)}；${fmt(p.width)} × ${fmt(p.height)}`;
 }
 
 function noteP(text) {

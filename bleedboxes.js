@@ -19,8 +19,14 @@
 //
 // 解析使用 pdf-lib 底层对象模型：MediaBox/CropBox/Rotate 经
 // PDFPageLeaf 的可继承属性读取，TrimBox/BleedBox 仅读叶子字典自身条目。
+//
+// 同一份逐页报告还附带「注释印刷风险区」（annotations.js）：解析页面 /Annots
+// 与各注释字典的 /Subtype、/Rect、/F、/AP/N，以继承 CropBox（缺省 MediaBox）
+// 为可见页框，按 Hidden/NoView/Print 标志与有效外观区分打印候选、待确认与
+// 漏印风险；仅核查 PDF 属性，不模拟渲染。
 
 import { PDFDocument, PDFName, PDFNumber } from 'pdf-lib';
+import { analyzePageAnnotations, ANNOT_STATUS } from './annotations.js';
 
 export class BleedBoxError extends Error {
   constructor(message) {
@@ -54,6 +60,11 @@ export const PAGE_STATUS = {
 export const SCOPE_NOTE =
   '本页仅核验 PDF 页面各盒（MediaBox / CropBox / TrimBox / BleedBox）的几何位置与尺寸，' +
   '不判断页面画面（图像、底色等）是否实际铺满出血区。';
+
+export const ANNOT_SCOPE_NOTE =
+  '注释印刷风险区仅核查 PDF 注释属性（/Subtype、/Rect、/F 标志位、/AP/N 外观是否存在），' +
+  '不模拟查看器或打印渲染：外观流内容是否可正常绘制、无外观时查看器是否自动生成外观，' +
+  '均不在核查范围内。';
 
 /** @typedef {{x:number,y:number,x2:number,y2:number,width:number,height:number}} Rect */
 
@@ -289,6 +300,33 @@ export async function checkBleedBoxes(buffer, {
       )
   );
 
+  // ---- 注释印刷风险汇总（页级）----
+  const annotPageNumbers = (s) =>
+    pages
+      .filter((pg) => pg.annotations.list.some((a) => a.status === s))
+      .map((pg) => pg.pageNumber);
+  const annotCounts = pages.reduce(
+    (acc, pg) => {
+      for (const key of Object.keys(acc)) acc[key] += pg.annotations.counts[key] || 0;
+      return acc;
+    },
+    {
+      total: 0,
+      printOk: 0,
+      printConfirm: 0,
+      screenRisk: 0,
+      offpage: 0,
+      inactive: 0,
+      unknown: 0,
+    }
+  );
+  const annotsNoList = pages
+    .filter((pg) => !pg.annotations.listValid)
+    .map((pg) => pg.pageNumber);
+  const annotsPresentPages = pages
+    .filter((pg) => pg.annotations.present)
+    .map((pg) => pg.pageNumber);
+
   return {
     finishedMm: { width: finishedWidthMm, height: finishedHeightMm },
     minBleedMm,
@@ -302,6 +340,19 @@ export async function checkBleedBoxes(buffer, {
       sizeMismatchPages,
       bleedRiskPages: [...riskEdgePageSet],
       okPages: byStatus(PAGE_STATUS.ok).map((pg) => pg.pageNumber),
+      annotation: {
+        pagesWithAnnots: annotsPresentPages,
+        // 汇总漏印风险页与待确认页
+        screenRiskPages: annotPageNumbers(ANNOT_STATUS.screenRisk),
+        printConfirmPages: annotPageNumbers(ANNOT_STATUS.printConfirm),
+        unknownPages: annotPageNumbers(ANNOT_STATUS.unknown),
+        offpagePages: annotPageNumbers(ANNOT_STATUS.offpage),
+        printOkPages: annotPageNumbers(ANNOT_STATUS.printOk),
+        invalidAnnotsPages: annotsNoList,
+        // 注释条数汇总
+        counts: annotCounts,
+        scopeNote: ANNOT_SCOPE_NOTE,
+      },
     },
     scopeNote: SCOPE_NOTE,
   };
@@ -523,6 +574,30 @@ function analyzePage(page, pageNumber, thresholds) {
     status = PAGE_STATUS.ok;
   }
 
+  // ---- 注释印刷风险（同一次上传、同一份逐页报告）----
+  // 可见页框：继承 CropBox（缺省 MediaBox）；盒几何无效时仍尽量解析注释。
+  let annotations;
+  try {
+    annotations = analyzePageAnnotations(node, { mediaBox, cropBox, rotation });
+  } catch (err) {
+    // 双保险：任何意外都不中断盒核验主流程
+    annotations = {
+      present: true,
+      listValid: false,
+      list: [],
+      note: `注释解析失败：${err.message}。`,
+      counts: {
+        total: 0,
+        printOk: 0,
+        printConfirm: 0,
+        screenRisk: 0,
+        offpage: 0,
+        inactive: 0,
+        unknown: 0,
+      },
+    };
+  }
+
   return {
     pageNumber,
     rotation,
@@ -533,6 +608,7 @@ function analyzePage(page, pageNumber, thresholds) {
     sizeCheck,
     bleedEdges,
     usableBleedRectMm,
+    annotations,
     notes,
   };
 }
