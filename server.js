@@ -10,6 +10,7 @@ import { checkPageNumbers, PageNumberError } from './pagenumbers.js';
 import { checkFontEmbedding, FontCheckError } from './fonts.js';
 import { analyzeImageResolution, ImageResolutionError } from './imageresolution.js';
 import { checkBleedBoxes, BleedBoxError } from './bleedboxes.js';
+import { checkAnnotations, AnnotationError } from './annotations.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
@@ -275,6 +276,8 @@ app.post('/api/image-resolution', (req, res) => {
 // 原稿裁切盒与出血盒核验：沿用同一套上传限制（multer 100 MB、仅 PDF），
 // 服务端用 pdf-lib 逐页读取继承的 MediaBox/CropBox/Rotate 与页面显式声明的
 // TrimBox/BleedBox，按旋转后阅读方向核对成品尺寸并逐边计算可用出血。
+// 同一份上传同时进入“注释印刷风险区”：逐页解析 /Annots 注释的
+// Subtype/Rect/F/AP，判定屏显与打印状态，结果随同一响应返回。
 app.post('/api/bleedboxes', (req, res) => {
   upload.single('pdf')(req, res, async (err) => {
     if (err) {
@@ -299,15 +302,18 @@ app.post('/api/bleedboxes', (req, res) => {
         finishedHeightMm,
         minBleedMm,
       });
+      // 注释印刷风险区：复用同一上传文件与逐页报告
+      const annotations = await checkAnnotations(req.file.buffer);
 
       const originalName =
         req.file.originalname
           ? Buffer.from(req.file.originalname, 'latin1').toString('utf8')
           : 'document.pdf';
 
-      res.json({ originalName, ...report });
+      res.json({ originalName, ...report, annotations });
     } catch (e) {
-      const status = e instanceof BleedBoxError ? 400 : 500;
+      const status =
+        e instanceof BleedBoxError || e instanceof AnnotationError ? 400 : 500;
       if (status === 500) console.error(e);
       res.status(status).json({
         error:

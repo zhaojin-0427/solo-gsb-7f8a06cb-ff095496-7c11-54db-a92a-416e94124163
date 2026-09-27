@@ -17,6 +17,26 @@ const EDGE_STATUS_LABEL = {
   risk: { text: '出血不足', cls: 'risk' },
 };
 
+// 注释印刷风险区：单条注释判定
+const ANNOT_STATUS_LABEL = {
+  'print-candidate': { text: '打印候选', cls: 'ok' },
+  'missed-print-risk': { text: '漏印风险', cls: 'risk' },
+  'needs-confirmation': { text: '待确认', cls: 'needs-confirmation' },
+  'off-page': { text: '页外', cls: 'off-page' },
+  unknown: { text: '无法判断', cls: 'unknown' },
+  ok: { text: '正常', cls: 'skip' },
+};
+
+// 注释印刷风险区：页面级状态
+const ANNOT_PAGE_STATUS_LABEL = {
+  none: { text: '无注释', cls: 'skip' },
+  ok: { text: '无风险', cls: 'ok' },
+  'missed-print-risk': { text: '漏印风险', cls: 'risk' },
+  'needs-confirmation': { text: '待确认', cls: 'needs-confirmation' },
+  'off-page': { text: '有页外注释', cls: 'off-page' },
+  unknown: { text: '无法判断', cls: 'unknown' },
+};
+
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
   hideError();
@@ -105,6 +125,9 @@ function renderReport(data) {
     pagesWrap.appendChild(renderPage(page));
   }
 
+  // 注释印刷风险区（复用同一上传与逐页报告）
+  if (data.annotations) renderAnnotations(data.annotations);
+
   resultBox.hidden = false;
   resultBox.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
@@ -150,6 +173,156 @@ function renderPage(page) {
     card.appendChild(noteP(text));
   }
   return card;
+}
+
+// ---- 注释印刷风险区 ----
+
+function renderAnnotations(ann) {
+  const { summary } = ann;
+  const pageList = (arr) =>
+    arr.length === 0 ? '无' : `第 ${arr.join('、')} 页`;
+
+  document.getElementById('annot-summary').replaceChildren(
+    row('含注释页', `${summary.pagesWithAnnotations} / ${summary.totalPages} 页`),
+    row('注释总数', `${summary.totalAnnotations} 条`),
+    row(
+      '漏印风险页',
+      `${summary.missedPrintRiskPages.length} 页（${pageList(summary.missedPrintRiskPages)}）：屏显候选但未设 Print，打印时将丢失`
+    ),
+    row(
+      '待确认页',
+      `${summary.needsConfirmationPages.length} 页（${pageList(summary.needsConfirmationPages)}）：设 Print 但外观缺失或损坏`
+    ),
+    row(
+      '页外注释页',
+      `${summary.offPagePages.length} 页（${pageList(summary.offPagePages)}）：注释矩形与可见页框无交集`
+    ),
+    row(
+      '无法判断页',
+      `${summary.unknownPages.length} 页（${pageList(summary.unknownPages)}）：注释引用损坏或字段非法`
+    ),
+    row(
+      '打印候选',
+      `${summary.counts.printCandidate} 条（设 Print 且外观有效，随页面打印）`
+    )
+  );
+
+  const wrap = document.getElementById('annot-pages');
+  wrap.textContent = '';
+  for (const page of ann.pages) {
+    wrap.appendChild(renderAnnotPage(page));
+  }
+}
+
+function renderAnnotPage(page) {
+  const status = ANNOT_PAGE_STATUS_LABEL[page.status];
+  const card = document.createElement('div');
+  card.className = `card page-card ${status.cls}`;
+
+  const head = document.createElement('div');
+  head.className = 'page-head';
+
+  const title = document.createElement('span');
+  title.className = 'page-title';
+  title.textContent = `第 ${page.pageNumber} 页`;
+  head.appendChild(title);
+
+  const meta = document.createElement('span');
+  meta.className = 'page-meta';
+  meta.textContent = page.counts
+    ? `注释 ${page.counts.total} 条 ｜ 漏印风险 ${page.counts.missedPrintRisk} ｜ ` +
+      `待确认 ${page.counts.needsConfirmation} ｜ 页外 ${page.counts.offPage} ｜ ` +
+      `无法判断 ${page.counts.unknown}`
+    : '无注释';
+  head.appendChild(meta);
+
+  const badge = document.createElement('span');
+  badge.className = `badge ${status.cls}`;
+  badge.textContent = status.text;
+  head.appendChild(badge);
+  card.appendChild(head);
+
+  if (page.pageError) {
+    card.appendChild(noteP(page.pageError));
+    return card;
+  }
+  if (page.annotations.length === 0) {
+    card.appendChild(noteP('本页无注释（页面未声明 /Annots 或为空数组）。'));
+    return card;
+  }
+  if (page.frameNote) card.appendChild(noteP(page.frameNote));
+  card.appendChild(renderAnnotTable(page.annotations));
+  return card;
+}
+
+function renderAnnotTable(annotations) {
+  const table = document.createElement('table');
+  table.className = 'annots';
+  table.innerHTML = `
+    <thead>
+      <tr><th>#</th><th>类型</th><th>原点 x / y（mm）</th><th>宽 × 高（mm）</th><th>屏显</th><th>打印</th><th>判定</th></tr>
+    </thead>
+    <tbody></tbody>`;
+  const tbody = table.querySelector('tbody');
+  for (const a of annotations) {
+    const tr = document.createElement('tr');
+    if (a.status === 'missed-print-risk') tr.className = 'row-mismatch';
+    else if (a.status === 'unknown') tr.className = 'row-unknown';
+
+    tr.appendChild(td(String(a.index), 'num'));
+
+    const typeTd = td(a.subtype ? `/${a.subtype}` : '—', 'boxname');
+    if (a.flags !== null && a.flags !== undefined) {
+      const f = document.createElement('div');
+      f.className = 'cell-reason';
+      f.textContent =
+        a.flagNames && a.flagNames.length > 0
+          ? `/F=${a.flags}（${a.flagNames.join('、')}）`
+          : `/F=${a.flags}`;
+      typeTd.appendChild(f);
+    }
+    tr.appendChild(typeTd);
+
+    if (a.rectMm) {
+      tr.appendChild(td(`${fmt(a.rectMm.x)} / ${fmt(a.rectMm.y)}`, 'num'));
+      tr.appendChild(td(`${fmt(a.rectMm.width)} × ${fmt(a.rectMm.height)}`, 'num'));
+    } else {
+      tr.appendChild(td('—', 'num'));
+      tr.appendChild(td('—', 'num'));
+    }
+
+    tr.appendChild(statusCell(a.screen));
+    tr.appendChild(statusCell(a.print));
+
+    const judgeTd = document.createElement('td');
+    const label = ANNOT_STATUS_LABEL[a.status];
+    const chip = document.createElement('span');
+    chip.className = `badge ${label.cls}`;
+    chip.textContent = label.text;
+    judgeTd.appendChild(chip);
+    for (const note of a.notes) {
+      judgeTd.appendChild(reasonDiv(note));
+    }
+    tr.appendChild(judgeTd);
+    tbody.appendChild(tr);
+  }
+  return table;
+}
+
+function statusCell(s) {
+  const cell = document.createElement('td');
+  const main = document.createElement('div');
+  main.textContent = s.text;
+  cell.appendChild(main);
+  cell.appendChild(reasonDiv(s.reason));
+  return cell;
+}
+
+function reasonDiv(text) {
+  const div = document.createElement('div');
+  div.className = 'cell-reason';
+  div.textContent = text;
+  return div;
 }
 
 function renderBoxTable(boxes) {
